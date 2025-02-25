@@ -96,6 +96,7 @@ def setup_network():
 
     print("*** Setting up QoS (Traffic Shaping and Policing)")
     setup_qos(r1)
+    setup_qos(r2)
 
     print("*** Testing connectivity")
     net.pingAll()
