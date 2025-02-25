@@ -13,6 +13,31 @@ def enable_ip_forwarding(router):
     """ Enable IP forwarding for routers """
     router.cmd("sysctl -w net.ipv4.ip_forward=1")
 
+def setup_qos(router):
+    """ Set up Traffic Shaping and Policing on the router """
+    
+    # Set up HTB qdisc (traffic shaping)
+    router.cmd("tc qdisc add dev r1-eth0 root handle 1: htb default 30")
+    router.cmd("tc qdisc add dev r1-eth1 root handle 1: htb default 30")
+
+    # Create classes for different types of traffic
+    router.cmd("tc class add dev r1-eth0 parent 1: classid 1:1 htb rate 1000kbps ceil 1000kbps")
+    router.cmd("tc class add dev r1-eth0 parent 1: classid 1:2 htb rate 512kbps ceil 512kbps")
+    router.cmd("tc class add dev r1-eth0 parent 1: classid 1:3 htb rate 256kbps ceil 256kbps")
+    
+    # Apply policing on each class (traffic policing)
+    router.cmd("tc qdisc add dev r1-eth0 parent 1:1 handle 10: police rate 1000kbps burst 10kb mpu 64k")
+    router.cmd("tc qdisc add dev r1-eth0 parent 1:2 handle 20: police rate 512kbps burst 10kb mpu 64k")
+    router.cmd("tc qdisc add dev r1-eth0 parent 1:3 handle 30: police rate 256kbps burst 10kb mpu 64k")
+
+    # Filters for classifying traffic based on port numbers
+    router.cmd("tc filter add dev r1-eth0 protocol ip prio 1 u32 match ip sport 5060 0xffff flowid 1:1")  # Voice traffic (SIP)
+    router.cmd("tc filter add dev r1-eth0 protocol ip prio 1 u32 match ip sport 5004 0xffff flowid 1:1")  # Voice traffic (RTP)
+    router.cmd("tc filter add dev r1-eth0 protocol ip prio 2 u32 match ip sport 554 0xffff flowid 1:2")   # Video traffic (RTSP)
+    router.cmd("tc filter add dev r1-eth0 protocol ip prio 3 u32 match ip sport 80 0xffff flowid 1:3")    # Data traffic (HTTP)
+
+    print(f"QoS policies applied to {router.name}-eth0")
+
 def setup_network():
     net = Mininet(controller=Controller, link=TCLink)
 
@@ -68,6 +93,9 @@ def setup_network():
     h2.cmd("ip route add default via 10.0.1.1")
     h3.cmd("ip route add default via 10.0.2.1")
     server.cmd("ip route add default via 10.0.2.1")
+
+    print("*** Setting up QoS (Traffic Shaping and Policing)")
+    setup_qos(r1)
 
     print("*** Testing connectivity")
     net.pingAll()
