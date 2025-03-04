@@ -13,6 +13,51 @@ def enable_ip_forwarding(router):
     """ Enable IP forwarding for routers """
     router.cmd("sysctl -w net.ipv4.ip_forward=1")
 
+def configure_qos(router):
+    """
+    Настройка QoS с использованием утилиты tc.
+    """
+    # Настройка QoS на интерфейсе, подключенном к хостам
+    router.cmd('tc qdisc add dev ' + router.defaultIntf().name + ' root handle 1: htb default 30')
+    router.cmd('tc class add dev ' + router.defaultIntf().name + ' parent 1: classid 1:1 htb rate 100mbit')
+    router.cmd('tc class add dev ' + router.defaultIntf().name + ' parent 1:1 classid 1:10 htb rate 50mbit ceil 100mbit')  # Голосовой трафик
+    router.cmd('tc class add dev ' + router.defaultIntf().name + ' parent 1:1 classid 1:20 htb rate 30mbit ceil 80mbit')   # Видеотрафик
+    router.cmd('tc class add dev ' + router.defaultIntf().name + ' parent 1:1 classid 1:30 htb rate 20mbit ceil 50mbit')   # Данные
+
+    # Привязка классов к портам
+    router.cmd('tc filter add dev ' + router.defaultIntf().name + ' protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff flowid 1:10')  # Голосовой
+    router.cmd('tc filter add dev ' + router.defaultIntf().name + ' protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff flowid 1:20')   # Видео
+    router.cmd('tc filter add dev ' + router.defaultIntf().name + ' protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff flowid 1:30')    # Данные (TCP)
+
+def start_iperf_server(server):
+    """
+    Запуск iperf сервера на хосте server.
+    """
+    print(f"*** Starting iperf server on {server.name}")
+    server.cmd('iperf -s -p 5060 &')  # Сервер для голосового трафика
+    server.cmd('iperf -s -p 554 &')   # Сервер для видеотрафика
+    server.cmd('iperf -s -p 80 &')    # Сервер для данных
+
+def generate_traffic(net):
+    """
+    Генерация трафика с использованием iperf.
+    """
+    print("*** Generating traffic")
+
+    # Голосовой трафик (UDP, низкая полоса пропускания)
+    h1 = net.get('h1')
+    h1.cmd('iperf -u -c 10.0.2.3 -p 5060 -b 1M -t 10 &')  # Голосовой трафик
+
+    # Видеотрафик (UDP, высокая полоса пропускания)
+    h2 = net.get('h2')
+    h2.cmd('iperf -u -c 10.0.2.3 -p 554 -b 10M -t 10 &')  # Видеотрафика
+
+    # Данные (TCP, случайная нагрузка)
+    h3 = net.get('h3')
+    h3.cmd('iperf -c 10.0.2.3 -p 80 -t 10 &')  # Данные
+
+    print("*** Traffic generation started")
+
 def setup_network():
     net = Mininet(controller=Controller, link=TCLink)
 
@@ -69,8 +114,18 @@ def setup_network():
     h3.cmd("ip route add default via 10.0.2.1")
     server.cmd("ip route add default via 10.0.2.1")
 
+    print("*** Configuring QoS policies")
+    configure_qos(r1)  # Настройка QoS на r1
+    configure_qos(r2)  # Настройка QoS на r2
+
+    print("*** Starting iperf server on server")
+    start_iperf_server(net.get('server'))  # Запуск iperf сервера
+
     print("*** Testing connectivity")
     net.pingAll()
+
+    print("*** Generating traffic")
+    generate_traffic(net)  # Генерация трафика
 
     print("*** Starting CLI")
     CLI(net)
