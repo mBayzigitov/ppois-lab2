@@ -3,6 +3,7 @@ from mininet.node import Controller, RemoteController, OVSSwitch, Node
 from mininet.link import TCLink
 from mininet.cli import CLI
 from mininet.log import setLogLevel
+from time import sleep
 
 def configure_routing(router, routes):
     """ Configure routing table for a router """
@@ -12,6 +13,32 @@ def configure_routing(router, routes):
 def enable_ip_forwarding(router):
     """ Enable IP forwarding for routers """
     router.cmd("sysctl -w net.ipv4.ip_forward=1")
+
+def setup_qos(router):
+    for iface in router.intfNames():
+        router.cmd(f"tc qdisc add dev {iface} root handle 1: htb default 30")
+        router.cmd(f"tc class add dev {iface} parent 1: classid 1:1 htb rate 1000kbps ceil 1000kbps")
+        router.cmd(f"tc class add dev {iface} parent 1: classid 1:2 htb rate 512kbps ceil 512kbps")
+        router.cmd(f"tc class add dev {iface} parent 1: classid 1:3 htb rate 256kbps ceil 256kbps")
+
+        router.cmd(f"tc qdisc add dev {iface} parent 1:1 handle 10: police rate 1000kbps burst 10kb mpu 64k")
+        router.cmd(f"tc qdisc add dev {iface} parent 1:2 handle 20: police rate 512kbps burst 10kb mpu 64k")
+        router.cmd(f"tc qdisc add dev {iface} parent 1:3 handle 30: police rate 256kbps burst 10kb mpu 64k")
+
+        router.cmd(f"tc filter add dev {iface} protocol ip prio 1 u32 match ip sport 5060 0xffff flowid 1:1")
+        router.cmd(f"tc filter add dev {iface} protocol ip prio 2 u32 match ip sport 554 0xffff flowid 1:2")
+        router.cmd(f"tc filter add dev {iface} protocol ip prio 3 u32 match ip sport 80 0xffff flowid 1:3")
+    print(f"QoS policies applied to {router.name}")
+
+def generate_traffic(h1, h2, h3, server):
+    print("*** Generating traffic")
+    server.cmd("iperf -s -u -p 5060 &")  # Voice traffic
+    server.cmd("iperf -s -u -p 554 &")  # Video traffic
+    server.cmd("iperf -s -u -p 80 &")   # HTTP traffic
+    sleep(1)
+    h1.cmd("iperf -c 10.0.2.3 -u -p 5060 -b 800k &")  # Voice
+    h2.cmd("iperf -c 10.0.2.3 -u -p 554 -b 400k &")  # Video
+    h3.cmd("iperf -c 10.0.2.3 -u -p 80 -b 200k &")  # HTTP
 
 def setup_network():
     net = Mininet(controller=Controller, link=TCLink)
@@ -35,11 +62,9 @@ def setup_network():
     print("*** Creating links")
     net.addLink(h1, s1)
     net.addLink(h2, s1)
-    net.addLink(s1, r1)  # r1-eth1 connects to s1
-
-    net.addLink(r1, r2)  # r1-eth2 <-> r2-eth1 (direct router link)
-
-    net.addLink(r2, s2)  # r2-eth2 connects to s2
+    net.addLink(s1, r1)
+    net.addLink(r1, r2)
+    net.addLink(r2, s2)
     net.addLink(h3, s2)
     net.addLink(server, s2)
 
@@ -47,21 +72,18 @@ def setup_network():
     net.start()
 
     print("*** Configuring IP addresses")
-    # Router 1 interfaces
-    r1.cmd("ifconfig r1-eth0 10.0.1.1/24 up")   # LAN side (to h1, h2 via s1)
-    r1.cmd("ifconfig r1-eth1 192.168.1.1/30 up")  # Link to Router 2
-
-    # Router 2 interfaces
-    r2.cmd("ifconfig r2-eth0 192.168.1.2/30 up")  # Link to Router 1
-    r2.cmd("ifconfig r2-eth1 10.0.2.1/24 up")   # LAN side (to h3, server via s2)
+    r1.cmd("ifconfig r1-eth0 10.0.1.1/24 up")
+    r1.cmd("ifconfig r1-eth1 192.168.1.1/30 up")
+    r2.cmd("ifconfig r2-eth0 192.168.1.2/30 up")
+    r2.cmd("ifconfig r2-eth1 10.0.2.1/24 up")
 
     print("*** Enabling IP forwarding")
     enable_ip_forwarding(r1)
     enable_ip_forwarding(r2)
 
     print("*** Configuring static routing")
-    configure_routing(r1, {"10.0.2.0/24": "192.168.1.2"})  # Route to h3, server via r2
-    configure_routing(r2, {"10.0.1.0/24": "192.168.1.1"})  # Route to h1, h2 via r1
+    configure_routing(r1, {"10.0.2.0/24": "192.168.1.2"})
+    configure_routing(r2, {"10.0.1.0/24": "192.168.1.1"})
 
     print("*** Setting default gateways for hosts")
     h1.cmd("ip route add default via 10.0.1.1")
@@ -69,8 +91,15 @@ def setup_network():
     h3.cmd("ip route add default via 10.0.2.1")
     server.cmd("ip route add default via 10.0.2.1")
 
+    print("*** Applying QoS policies")
+    setup_qos(r1)
+    setup_qos(r2)
+
     print("*** Testing connectivity")
     net.pingAll()
+
+    print("*** Generating traffic")
+    generate_traffic(h1, h2, h3, server)
 
     print("*** Starting CLI")
     CLI(net)
