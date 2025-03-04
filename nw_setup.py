@@ -5,40 +5,27 @@ from mininet.cli import CLI
 from mininet.log import setLogLevel
 from time import sleep
 
+
 def configure_routing(router, routes):
     for route, via in routes.items():
+        router.cmd(f'ip route del {route} via {via} 2>/dev/null')  # Удаляем маршрут, если он есть
         router.cmd(f'ip route add {route} via {via}')
 
 
 def enable_ip_forwarding(router):
     router.cmd("sysctl -w net.ipv4.ip_forward=1")
 
+
 def setup_qos(router):
-    for iface in ['r1-eth0', 'r1-eth1']:
+    for iface in router.intfNames():  # Автоматически настраиваем QoS на всех интерфейсах
         router.cmd(f"tc qdisc add dev {iface} root handle 1: htb default 30")
         router.cmd(f"tc class add dev {iface} parent 1: classid 1:1 htb rate 1000kbps ceil 1000kbps")
         router.cmd(f"tc class add dev {iface} parent 1: classid 1:2 htb rate 512kbps ceil 512kbps")
         router.cmd(f"tc class add dev {iface} parent 1: classid 1:3 htb rate 256kbps ceil 256kbps")
-
         router.cmd(f"tc qdisc add dev {iface} parent 1:1 handle 10: police rate 1000kbps burst 10kb mpu 64k")
         router.cmd(f"tc qdisc add dev {iface} parent 1:2 handle 20: police rate 512kbps burst 10kb mpu 64k")
         router.cmd(f"tc qdisc add dev {iface} parent 1:3 handle 30: police rate 256kbps burst 10kb mpu 64k")
-
-        router.cmd(f"tc filter add dev {iface} protocol ip prio 1 u32 match ip sport 5060 0xffff flowid 1:1")
-        router.cmd(f"tc filter add dev {iface} protocol ip prio 2 u32 match ip sport 554 0xffff flowid 1:2")
-        router.cmd(f"tc filter add dev {iface} protocol ip prio 3 u32 match ip sport 80 0xffff flowid 1:3")
     print(f"QoS policies applied to {router.name}")
-
-
-def generate_traffic(h1, h2, h3, server):
-    print("*** Generating traffic")
-    server.cmd("iperf -s -u -p 5060 &")  # Voice traffic
-    server.cmd("iperf -s -u -p 554 &")  # Video traffic
-    server.cmd("iperf -s -u -p 80 &")  # HTTP traffic
-    sleep(1)
-    h1.cmd("iperf -c 10.0.2.3 -u -p 5060 -b 800k &")  # Voice
-    h2.cmd("iperf -c 10.0.2.3 -u -p 554 -b 400k &")  # Video
-    h3.cmd("iperf -c 10.0.2.3 -u -p 80 -b 200k &")  # HTTP
 
 
 def setup_network():
@@ -86,9 +73,6 @@ def setup_network():
     setup_qos(r2)
 
     net.pingAll()
-
-    generate_traffic(h1, h2, h3, server)
-
     CLI(net)
     net.stop()
 
