@@ -36,7 +36,7 @@ if __name__ == '__main__':
     net = Mininet(topo=topo, controller=Controller, switch=OVSKernelSwitch, link=TCLink)
     net.start()
 
-    print("Сеть запущена. Проверяем соединения:")
+    print("Network started")
     net.pingAll()
 
     CLI(net)  # Открываем CLI Mininet
