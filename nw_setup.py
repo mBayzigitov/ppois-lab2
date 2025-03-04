@@ -54,7 +54,7 @@ def generate_traffic(net):
 
     # Данные (TCP, случайная нагрузка)
     h3 = net.get('h3')
-    h3.cmd('iperf -c 10.0.2.3 -p 80 -t 60 &')  # Данные
+    h3.cmd('iperf -c 10.0.2.3 -p 80 -b 100M -t 60 &')  # Данные
 
     print("*** Traffic generation started")
 
