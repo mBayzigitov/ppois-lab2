@@ -13,21 +13,16 @@ def enable_ip_forwarding(router):
     """ Enable IP forwarding for routers """
     router.cmd("sysctl -w net.ipv4.ip_forward=1")
 
-def configure_qos(router):
-    """
-    Настройка QoS с использованием утилиты tc.
-    """
-    # Настройка QoS на интерфейсе, подключенном к хостам
-    router.cmd('tc qdisc add dev ' + router.defaultIntf().name + ' root handle 1: htb default 30')
-    router.cmd('tc class add dev ' + router.defaultIntf().name + ' parent 1: classid 1:1 htb rate 100mbit')
-    router.cmd('tc class add dev ' + router.defaultIntf().name + ' parent 1:1 classid 1:10 htb rate 50mbit ceil 100mbit')  # Голосовой трафик
-    router.cmd('tc class add dev ' + router.defaultIntf().name + ' parent 1:1 classid 1:20 htb rate 30mbit ceil 80mbit')   # Видеотрафик
-    router.cmd('tc class add dev ' + router.defaultIntf().name + ' parent 1:1 classid 1:30 htb rate 20mbit ceil 50mbit')   # Данные
+def configure_qos(router, name):
+    router.cmd(f'tc qdisc add dev {name} root handle 1: htb default 30')
+    router.cmd(f'tc class add dev {name} parent 1: classid 1:1 htb rate 100mbit')
+    router.cmd(f'tc class add dev {name} parent 1:1 classid 1:10 htb rate 50mbit ceil 100mbit')  # Голосовой трафик
+    router.cmd(f'tc class add dev {name} parent 1:1 classid 1:20 htb rate 30mbit ceil 80mbit')   # Видеотрафик
+    router.cmd(f'tc class add dev {name} parent 1:1 classid 1:30 htb rate 20mbit ceil 50mbit')   # Данные
 
-    # Привязка классов к портам
-    router.cmd('tc filter add dev ' + router.defaultIntf().name + ' protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff flowid 1:10')  # Голосовой
-    router.cmd('tc filter add dev ' + router.defaultIntf().name + ' protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff flowid 1:20')   # Видео
-    router.cmd('tc filter add dev ' + router.defaultIntf().name + ' protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff flowid 1:30')    # Данные (TCP)
+    router.cmd(f'tc filter add dev {name} protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff flowid 1:10')  # Голосовой
+    router.cmd(f'tc filter add dev {name} protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff flowid 1:20')   # Видео
+    router.cmd(f'tc filter add dev {name} protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff flowid 1:30')    # Данные (TCP)
 
 def start_iperf_server(server):
     """
@@ -115,8 +110,10 @@ def setup_network():
     server.cmd("ip route add default via 10.0.2.1")
 
     print("*** Configuring QoS policies")
-    configure_qos(r1)  # Настройка QoS на r1
-    configure_qos(r2)  # Настройка QoS на r2
+    configure_qos(r1,"r1-eth0")  # Настройка QoS на r1
+    configure_qos(r1,"r1-eth1")  # Настройка QoS на r1
+    configure_qos(r2, "r2-eth0")  # Настройка QoS на r2
+    configure_qos(r2, "r2-eth1")  # Настройка QoS на r2
 
     print("*** Starting iperf server on server")
     start_iperf_server(net.get('server'))  # Запуск iperf сервера
