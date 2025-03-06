@@ -1,171 +1,141 @@
+import ipaddress
+from time import sleep
+
 from mininet.net import Mininet
-from mininet.node import Controller, RemoteController, OVSSwitch, Node
-from mininet.link import TCLink
+from mininet.topo import Topo
+from mininet.node import Node
 from mininet.cli import CLI
-from mininet.log import setLogLevel
+from mininet.log import setLogLevel, info
 
-def configure_routing(router, routes):
-    """ Configure routing table for a router """
-    for route, via in routes.items():
-        router.cmd(f'ip route add {route} via {via}')
 
-def enable_ip_forwarding(router):
-    """ Enable IP forwarding for routers """
-    router.cmd("sysctl -w net.ipv4.ip_forward=1")
+class LinuxRouter(Node):
+    def config(self, **params):
+        super(LinuxRouter, self).config(**params)
+        self.cmd('sysctl net.ipv4.ip_forward=1')
 
-def start_iperf_server(server):
-    """
-    Запуск iperf сервера на хосте server.
-    """
-    print(f"*** Starting iperf server on {server.name}")
-    server.cmd('iperf -s -p 5060 &')  # Сервер для голосового трафика
-    server.cmd('iperf -s -p 554 &')   # Сервер для видеотрафика
-    server.cmd('iperf -s -p 80 &')    # Сервер для данных
+    def terminate(self):
+        self.cmd('sysctl net.ipv4.ip_forward=0')
+        super(LinuxRouter, self).terminate()
 
-def generate_traffic(net):
-    """
-    Генерация трафика с использованием iperf.
-    """
-    print("*** Generating traffic")
+class NetworkTopo(Topo):
+    def build(self, **_opts):
+        r1 = self.addNode('r1', cls=LinuxRouter, ip='10.0.1.1/24')
+        r2 = self.addNode('r2', cls=LinuxRouter, ip='10.0.2.1/24')
 
-    # Голосовой трафик (UDP, низкая полоса пропускания)
-    h1 = net.get('h1')
-    h1.cmd('iperf -u -c 10.0.2.3 -p 5060 -b 1M -t 60 &')  # Голосовой трафик
+        s1 = self.addSwitch('s1')
+        s2 = self.addSwitch('s2')
 
-    # Видеотрафик (UDP, высокая полоса пропускания)
-    h2 = net.get('h2')
-    h2.cmd('iperf -u -c 10.0.2.3 -p 554 -b 10M -t 60 &')  # Видеотрафика
+        self.addLink(
+            s1,
+            r1,
+            intfName2='r1-eth1',
+            params2={'ip': '10.0.1.1/24'}
+        )
 
-    # Данные (TCP, случайная нагрузка)
-    h3 = net.get('h3')
-    h3.cmd('iperf -c 10.0.2.3 -p 80 -b 100M -t 60 &')  # Данные
+        self.addLink(
+            s2,
+            r2,
+            intfName2='r2-eth1',
+            params2={'ip': '10.0.2.1/24'}
+        )
 
-    print("*** Traffic generation started")
+        self.addLink(
+            r1,
+            r2,
+            intfName1='r1-eth2',
+            intfName2='r2-eth2',
+            params1={'ip': '10.100.0.1/24'},
+            params2={'ip': '10.100.0.2/24'}
+        )
+        
+        h1 = self.addHost('h1', ip='10.0.1.101/24', defaultRoute='via 10.0.1.1')
+        h2 = self.addHost('h2', ip='10.0.1.102/24', defaultRoute='via 10.0.1.1')
+        h3 = self.addHost('h3', ip='10.0.1.103/24', defaultRoute='via 10.0.1.1')
+        
+        server = self.addHost('server', ip='10.0.2.101/24', defaultRoute='via 10.0.2.1')
+        
+        self.addLink(h1, s1)
+        self.addLink(h2, s1)
+        self.addLink(h3, s1)
+        self.addLink(server, s2)
 
+def configure_routes(net):
+    r1, r2 = net.get('r1', 'r2')
+    info(r1.cmd("ip route add 10.0.2.0/24 via 10.100.0.2 dev r1-eth2"))
+    info(r2.cmd("ip route add 10.0.1.0/24 via 10.100.0.1 dev r2-eth2"))
+    
+    
 def configure_qos(net):
-    """
-    Настройка Traffic Shaping и Policing на маршрутизаторах.
-    """
-    r1 = net.get('r1')
-    r2 = net.get('r2')
+    r1, r2 = net.get('r1', 'r2')
+    
+    for router, iface in [(r1, 'r1-eth2'), (r2, 'r2-eth2')]:
+        router.cmd(f'tc qdisc del dev {iface} root') #Удаляет существующую корневую очередь пакетов (qdisc)
+        router.cmd(f'tc qdisc add dev {iface} root handle 1: htb default 30') #Добавляет новую очередь пакетов (Hierarchical Token Bucket)
+        
+        router.cmd(f'tc class add dev {iface} parent 1: classid 1:1 htb rate 10mbit') #Ограничение скорости до 10mbit
+        
+        router.cmd(f'tc class add dev {iface} parent 1:1 classid 1:10 htb rate 2mbit ceil 4mbit prio 1') #2mbit гарант, приоритет выс
+        router.cmd(f'tc class add dev {iface} parent 1:1 classid 1:20 htb rate 4mbit ceil 6mbit prio 2') #4mbit гарант, приоритет сред
+        router.cmd(f'tc class add dev {iface} parent 1:1 classid 1:30 htb rate 1mbit ceil 10mbit prio 3') #1mbit гарант, приоритет низ
+        
+        #u32 match ip tos 184 0xff: Сопоставляет пакеты с TOS 184 (маска 0xff проверяет все 8 бит). flowid 1:10: Направляет пакеты в класс 1:10.
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip tos 184 0xff flowid 1:10')
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match ip tos 160 0xff flowid 1:20')
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 3 u32 match ip tos 0 0xff flowid 1:30')     
+        
+        #Ограничивает скорость до 4 Мбит/с с буфером 20 Кбайт, отбрасывая превышающие пакеты.
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip tos 184 0xff police rate 4mbit burst 20k drop')
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match ip tos 160 0xff police rate 6mbit burst 40k drop')
 
-    print("*** Configuring QoS on r1")
 
-    # Traffic Shaping на интерфейсе r1-eth0 (со стороны h1 и h2)
-    r1.cmd('tc qdisc add dev r1-eth0 root handle 1: htb default 30')
-    r1.cmd('tc class add dev r1-eth0 parent 1: classid 1:1 htb rate 100mbit')
-    r1.cmd('tc class add dev r1-eth0 parent 1:1 classid 1:10 htb rate 1mbit ceil 1mbit')  # Голосовой трафик
-    r1.cmd('tc class add dev r1-eth0 parent 1:1 classid 1:20 htb rate 5mbit ceil 5mbit')  # Видеотрафик
-    r1.cmd('tc class add dev r1-eth0 parent 1:1 classid 1:30 htb rate 10mbit ceil 10mbit')  # Данные
+def servers_start(net):
+    server = net.get('server')
 
-    # Привязка классов к портам
-    r1.cmd('tc filter add dev r1-eth0 protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff flowid 1:10')  # Голосовой
-    r1.cmd('tc filter add dev r1-eth0 protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff flowid 1:20')   # Видео
-    r1.cmd('tc filter add dev r1-eth0 protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff flowid 1:30')    # Данные (TCP)
+    server.cmd('iperf -s -p 6001 -u &')
+    server.cmd('iperf -s -p 6002 -u &')
+    server.cmd('iperf -s -p 6003 &')
 
-    # Policing на интерфейсе r1-eth1 (со стороны r2)
-    r1.cmd('tc qdisc add dev r1-eth1 root handle 1: htb default 30')
-    r1.cmd('tc class add dev r1-eth1 parent 1: classid 1:1 htb rate 100mbit')
-    r1.cmd('tc filter add dev r1-eth1 protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff police rate 1mbit burst 10k drop flowid 1:10')  # Голосовой
-    r1.cmd('tc filter add dev r1-eth1 protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff police rate 5mbit burst 50k drop flowid 1:20')   # Видео
-    r1.cmd('tc filter add dev r1-eth1 protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff police rate 10mbit burst 100k drop flowid 1:30')  # Данные
 
-    print("*** Configuring QoS on r2")
+# def traffic_generate(net):
+#     info("Генерация трафика\n")
+#     h1, h2, h3 = net.get('h1', 'h2', 'h3')
 
-    # Traffic Shaping на интерфейсе r2-eth1 (со стороны h3 и server)
-    r2.cmd('tc qdisc add dev r2-eth1 root handle 1: htb default 30')
-    r2.cmd('tc class add dev r2-eth1 parent 1: classid 1:1 htb rate 100mbit')
-    r2.cmd('tc class add dev r2-eth1 parent 1:1 classid 1:10 htb rate 1mbit ceil 1mbit')  # Голосовой трафик
-    r2.cmd('tc class add dev r2-eth1 parent 1:1 classid 1:20 htb rate 5mbit ceil 5mbit')  # Видеотрафик
-    r2.cmd('tc class add dev r2-eth1 parent 1:1 classid 1:30 htb rate 10mbit ceil 10mbit')  # Данные
+#     h1.cmd('iperf -c server -u -p 6001 -b 3M -t 4 -S 0xB8 &')
+#     h2.cmd('iperf -c server -u -p 6002 -b 9M -t 4 -S 0xA0 &')
+#     h3.cmd('iperf -c server -p 6003 -t 4 &')
 
-    # Привязка классов к портам
-    r2.cmd('tc filter add dev r2-eth1 protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff flowid 1:10')  # Голосовой
-    r2.cmd('tc filter add dev r2-eth1 protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff flowid 1:20')   # Видео
-    r2.cmd('tc filter add dev r2-eth1 protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff flowid 1:30')    # Данные (TCP)
 
-    # Policing на интерфейсе r2-eth0 (со стороны r1)
-    r2.cmd('tc qdisc add dev r2-eth0 root handle 1: htb default 30')
-    r2.cmd('tc class add dev r2-eth0 parent 1: classid 1:1 htb rate 100mbit')
-    r2.cmd('tc filter add dev r2-eth0 protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff police rate 1mbit burst 10k drop flowid 1:10')  # Голосовой
-    r2.cmd('tc filter add dev r2-eth0 protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff police rate 5mbit burst 50k drop flowid 1:20')   # Видео
-    r2.cmd('tc filter add dev r2-eth0 protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff police rate 10mbit burst 100k drop flowid 1:30')  # Данные
-
-def setup_network():
-    net = Mininet(controller=Controller, link=TCLink)
-
-    print("*** Adding controller")
-    net.addController("c0")
-
-    print("*** Creating nodes")
-    h1 = net.addHost("h1", ip="10.0.1.2/24")
-    h2 = net.addHost("h2", ip="10.0.1.3/24")
-    h3 = net.addHost("h3", ip="10.0.2.2/24")
-    server = net.addHost("server", ip="10.0.2.3/24")
-
-    r1 = net.addHost("r1")  # Router 1
-    r2 = net.addHost("r2")  # Router 2
-
-    print("*** Creating switches")
-    s1 = net.addSwitch("s1")
-    s2 = net.addSwitch("s2")
-
-    print("*** Creating links")
-    net.addLink(h1, s1)
-    net.addLink(h2, s1)
-    net.addLink(s1, r1)  # r1-eth1 connects to s1
-
-    net.addLink(r1, r2)  # r1-eth2 <-> r2-eth1 (direct router link)
-
-    net.addLink(r2, s2)  # r2-eth2 connects to s2
-    net.addLink(h3, s2)
-    net.addLink(server, s2)
-
-    print("*** Starting network")
+if __name__ == '__main__':
+    setLogLevel('info')
+    
+    topo = NetworkTopo()
+    net = Mininet(topo=topo)
+    
     net.start()
-
-    print("*** Configuring IP addresses")
-    # Router 1 interfaces
-    r1.cmd("ifconfig r1-eth0 10.0.1.1/24 up")   # LAN side (to h1, h2 via s1)
-    r1.cmd("ifconfig r1-eth1 192.168.1.1/30 up")  # Link to Router 2
-
-    # Router 2 interfaces
-    r2.cmd("ifconfig r2-eth0 192.168.1.2/30 up")  # Link to Router 1
-    r2.cmd("ifconfig r2-eth1 10.0.2.1/24 up")   # LAN side (to h3, server via s2)
-
-    print("*** Enabling IP forwarding")
-    enable_ip_forwarding(r1)
-    enable_ip_forwarding(r2)
-
-    print("*** Configuring static routing")
-    configure_routing(r1, {"10.0.2.0/24": "192.168.1.2"})  # Route to h3, server via r2
-    configure_routing(r2, {"10.0.1.0/24": "192.168.1.1"})  # Route to h1, h2 via r1
-
-    print("*** Setting default gateways for hosts")
-    h1.cmd("ip route add default via 10.0.1.1")
-    h2.cmd("ip route add default via 10.0.1.1")
-    h3.cmd("ip route add default via 10.0.2.1")
-    server.cmd("ip route add default via 10.0.2.1")
-
-    # Настройка QoS
-    print("*** Configuring QoS policies")
+    
+    configure_routes(net)
     configure_qos(net)
+    r1 = net.get('r1')
+    
+    r1.cmd('python3 classifier.py r1-eth2 > classifier.log 2>&1 &')
 
-    print("*** Starting iperf server on server")
-    start_iperf_server(net.get('server'))  # Запуск iperf сервера
-
-    print("*** Testing connectivity")
-    net.pingAll()
-
-    print("*** Generating traffic")
-    generate_traffic(net)  # Генерация трафика
-
-    print("*** Starting CLI")
+    servers_start(net)
+    # traffic_generate(net)    
+    
     CLI(net)
 
-    print("*** Stopping network")
     net.stop()
 
-if __name__ == "__main__":
-    setLogLevel("info")
-    setup_network()
+#disable qos
+#r1 tc qdisc del dev r1-eth2 root
+#r2 tc qdisc del dev r2-eth2 root
+
+#traffic generate
+#h1 iperf -c server -u -p 6001 -b 128K -t 120 -S 0xB8 &
+#h2 iperf -c server -u -p 6002 -b 6M -t 120 -S 0xA0 &
+#h3 iperf -c server -p 6003 -b 100M -t 180 -S 0 &
+
+#iperf server start
+#server iperf -s -p 6001 -u &
+#server iperf -s -p 6002 -u &
+#server iperf -s -p 6003 &
