@@ -14,26 +14,44 @@ def enable_ip_forwarding(router):
     router.cmd("sysctl -w net.ipv4.ip_forward=1")
 
 def configure_qos(net):
-    r1, r2 = net.get('r1', 'r2')
-    
-    for router, iface in [(r1, 'r1-eth1'), (r1, 'r1-eth0'), (r2, 'r2-eth1'), (r2, 'r2-eth0')]:
-        router.cmd(f'tc qdisc del dev {iface} root') #Удаляет существующую корневую очередь пакетов (qdisc)
-        router.cmd(f'tc qdisc add dev {iface} root handle 1: htb default 30') #Добавляет новую очередь пакетов (Hierarchical Token Bucket)
-        
-        router.cmd(f'tc class add dev {iface} parent 1: classid 1:1 htb rate 10mbit') #Ограничение скорости до 10mbit
-        
-        router.cmd(f'tc class add dev {iface} parent 1:1 classid 1:10 htb rate 2mbit ceil 4mbit prio 1') #2mbit гарант, приоритет выс
-        router.cmd(f'tc class add dev {iface} parent 1:1 classid 1:20 htb rate 4mbit ceil 6mbit prio 2') #4mbit гарант, приоритет сред
-        router.cmd(f'tc class add dev {iface} parent 1:1 classid 1:30 htb rate 1mbit ceil 10mbit prio 3') #1mbit гарант, приоритет низ
-        
-        #u32 match ip tos 184 0xff: Сопоставляет пакеты с TOS 184 (маска 0xff проверяет все 8 бит). flowid 1:10: Направляет пакеты в класс 1:10.
-        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip tos 184 0xff flowid 1:10')
-        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match ip tos 160 0xff flowid 1:20')
-        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 3 u32 match ip tos 0 0xff flowid 1:30')     
-        
-        #Ограничивает скорость до 4 Мбит/с с буфером 20 Кбайт, отбрасывая превышающие пакеты.
-        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip tos 184 0xff police rate 4mbit burst 20k drop')
-        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match ip tos 160 0xff police rate 6mbit burst 40k drop')
+    """
+    Настройка QoS с Traffic Shaping и Policing на маршрутизаторах.
+    """
+    r1 = net.get("r1")
+    r2 = net.get("r2")
+
+    print("*** Configuring QoS on r1 and r2")
+
+    # Очистка старых правил
+    r1.cmd("tc qdisc del dev r1-eth1 root || true")
+    r2.cmd("tc qdisc del dev r2-eth0 root || true")
+
+    # Traffic Shaping на r1 (искусственное ограничение скорости)
+    r1.cmd("tc qdisc add dev r1-eth1 root handle 1: htb default 30")
+    r1.cmd("tc class add dev r1-eth1 parent 1: classid 1:1 htb rate 10mbit")
+    r1.cmd("tc class add dev r1-eth1 parent 1:1 classid 1:10 htb rate 1mbit ceil 2mbit")  # Голос
+    r1.cmd("tc class add dev r1-eth1 parent 1:1 classid 1:20 htb rate 5mbit ceil 8mbit")  # Видео
+    r1.cmd("tc class add dev r1-eth1 parent 1:1 classid 1:30 htb rate 2mbit ceil 4mbit")  # Данные
+
+    # Фильтры по портам
+    r1.cmd("tc filter add dev r1-eth1 protocol ip parent 1: prio 1 u32 match ip sport 5060 0xffff flowid 1:10")
+    r1.cmd("tc filter add dev r1-eth1 protocol ip parent 1: prio 2 u32 match ip sport 554 0xffff flowid 1:20")
+    r1.cmd("tc filter add dev r1-eth1 protocol ip parent 1: prio 3 u32 match ip sport 80 0xffff flowid 1:30")
+
+    print("*** QoS configured on r1")
+
+    # Аналогичная настройка на r2
+    r2.cmd("tc qdisc add dev r2-eth0 root handle 1: htb default 30")
+    r2.cmd("tc class add dev r2-eth0 parent 1: classid 1:1 htb rate 10mbit")
+    r2.cmd("tc class add dev r2-eth0 parent 1:1 classid 1:10 htb rate 1mbit ceil 2mbit")  # Голос
+    r2.cmd("tc class add dev r2-eth0 parent 1:1 classid 1:20 htb rate 5mbit ceil 8mbit")  # Видео
+    r2.cmd("tc class add dev r2-eth0 parent 1:1 classid 1:30 htb rate 2mbit ceil 4mbit")  # Данные
+
+    r2.cmd("tc filter add dev r2-eth0 protocol ip parent 1: prio 1 u32 match ip dport 5060 0xffff flowid 1:10")
+    r2.cmd("tc filter add dev r2-eth0 protocol ip parent 1: prio 2 u32 match ip dport 554 0xffff flowid 1:20")
+    r2.cmd("tc filter add dev r2-eth0 protocol ip parent 1: prio 3 u32 match ip dport 80 0xffff flowid 1:30")
+
+    print("*** QoS configured on r2")
 
 
 def start_iperf_server(server):
