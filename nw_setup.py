@@ -16,7 +16,7 @@ def enable_ip_forwarding(router):
 def configure_qos(net):
     r1, r2 = net.get('r1', 'r2')
     
-    for router, iface in [(r1, 'r1-eth1'), (r2, 'r2-eth0')]:
+    for router, iface in [(r1, 'r1-eth1'), (r1, 'r1-eth0'), (r2, 'r2-eth1'), (r2, 'r2-eth0')]:
         router.cmd(f'tc qdisc del dev {iface} root') #Удаляет существующую корневую очередь пакетов (qdisc)
         router.cmd(f'tc qdisc add dev {iface} root handle 1: htb default 30') #Добавляет новую очередь пакетов (Hierarchical Token Bucket)
         
