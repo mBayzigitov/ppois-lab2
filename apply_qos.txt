@@ -1,0 +1,17 @@
+tc qdisc add dev r1 root handle 1: htb default 30
+tc class add dev r1 parent 1: classid 1:1 htb rate 100mbit
+tc class add dev r1 parent 1:1 classid 1:10 htb rate 50mbit ceil 100mbit
+tc class add dev r1 parent 1:1 classid 1:20 htb rate 30mbit ceil 80mbit   
+tc class add dev r1 parent 1:1 classid 1:30 htb rate 20mbit ceil 50mbit   
+tc filter add dev r1 protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff flowid 1:10  
+tc filter add dev r1 protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff flowid 1:20   
+tc filter add dev r1 protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff flowid 1:30
+
+tc qdisc add dev r2 root handle 1: htb default 30
+tc class add dev r2 parent 1: classid 1:1 htb rate 100mbit
+tc class add dev r2 parent 1:1 classid 1:10 htb rate 50mbit ceil 100mbit
+tc class add dev r2 parent 1:1 classid 1:20 htb rate 30mbit ceil 80mbit   
+tc class add dev r2 parent 1:1 classid 1:30 htb rate 20mbit ceil 50mbit   
+tc filter add dev r2 protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff flowid 1:10  
+tc filter add dev r2 protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff flowid 1:20   
+tc filter add dev r2 protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff flowid 1:30
