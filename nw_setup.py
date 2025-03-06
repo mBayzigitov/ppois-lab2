@@ -13,16 +13,28 @@ def enable_ip_forwarding(router):
     """ Enable IP forwarding for routers """
     router.cmd("sysctl -w net.ipv4.ip_forward=1")
 
-def configure_qos(router, name):
-    router.cmd(f'tc qdisc add dev {name} root handle 1: htb default 30')
-    router.cmd(f'tc class add dev {name} parent 1: classid 1:1 htb rate 100mbit')
-    router.cmd(f'tc class add dev {name} parent 1:1 classid 1:10 htb rate 50mbit ceil 100mbit')  # Голосовой трафик
-    router.cmd(f'tc class add dev {name} parent 1:1 classid 1:20 htb rate 30mbit ceil 80mbit')   # Видеотрафик
-    router.cmd(f'tc class add dev {name} parent 1:1 classid 1:30 htb rate 20mbit ceil 50mbit')   # Данные
+def configure_qos(net):
+    r1, r2 = net.get('r1', 'r2')
+    
+    for router, iface in [(r1, 'r1-eth1'), (r2, 'r2-eth0')]:
+        router.cmd(f'tc qdisc del dev {iface} root') #Удаляет существующую корневую очередь пакетов (qdisc)
+        router.cmd(f'tc qdisc add dev {iface} root handle 1: htb default 30') #Добавляет новую очередь пакетов (Hierarchical Token Bucket)
+        
+        router.cmd(f'tc class add dev {iface} parent 1: classid 1:1 htb rate 10mbit') #Ограничение скорости до 10mbit
+        
+        router.cmd(f'tc class add dev {iface} parent 1:1 classid 1:10 htb rate 2mbit ceil 4mbit prio 1') #2mbit гарант, приоритет выс
+        router.cmd(f'tc class add dev {iface} parent 1:1 classid 1:20 htb rate 4mbit ceil 6mbit prio 2') #4mbit гарант, приоритет сред
+        router.cmd(f'tc class add dev {iface} parent 1:1 classid 1:30 htb rate 1mbit ceil 10mbit prio 3') #1mbit гарант, приоритет низ
+        
+        #u32 match ip tos 184 0xff: Сопоставляет пакеты с TOS 184 (маска 0xff проверяет все 8 бит). flowid 1:10: Направляет пакеты в класс 1:10.
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip tos 184 0xff flowid 1:10')
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match ip tos 160 0xff flowid 1:20')
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 3 u32 match ip tos 0 0xff flowid 1:30')     
+        
+        #Ограничивает скорость до 4 Мбит/с с буфером 20 Кбайт, отбрасывая превышающие пакеты.
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 1 u32 match ip tos 184 0xff police rate 4mbit burst 20k drop')
+        router.cmd(f'tc filter add dev {iface} protocol ip parent 1:0 prio 2 u32 match ip tos 160 0xff police rate 6mbit burst 40k drop')
 
-    router.cmd(f'tc filter add dev {name} protocol ip parent 1:0 prio 1 u32 match ip dport 5060 0xffff flowid 1:10')  # Голосовой
-    router.cmd(f'tc filter add dev {name} protocol ip parent 1:0 prio 2 u32 match ip dport 554 0xffff flowid 1:20')   # Видео
-    router.cmd(f'tc filter add dev {name} protocol ip parent 1:0 prio 3 u32 match ip protocol 6 0xff flowid 1:30')    # Данные (TCP)
 
 def start_iperf_server(server):
     """
@@ -110,10 +122,7 @@ def setup_network():
     server.cmd("ip route add default via 10.0.2.1")
 
     print("*** Configuring QoS policies")
-    configure_qos(r1,"r1-eth0")  # Настройка QoS на r1
-    configure_qos(r1,"r1-eth1")  # Настройка QoS на r1
-    configure_qos(r2, "r2-eth0")  # Настройка QoS на r2
-    configure_qos(r2, "r2-eth1")  # Настройка QoS на r2
+    configure_qos(net)
 
     print("*** Starting iperf server on server")
     start_iperf_server(net.get('server'))  # Запуск iperf сервера
